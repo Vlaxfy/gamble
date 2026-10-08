@@ -21,7 +21,7 @@ const ses=u=>{let s=SES.get(u.id);if(!s)SES.set(u.id,s={});return s};
 const nk=s=>String(s).toLowerCase().replace(/\s+/g,'');
 function freeName(){for(let i=0;i<60;i++){const n='Player'+(100+crypto.randomInt(9900));if(!Object.values(DB.users).some(o=>nk(o.name)===nk(n)))return n}return'Player'+rid(3)}
 function mkUser(){const id=rid(6),u={id,tok:rid(16),name:freeName(),color:PC[crypto.randomInt(PC.length)],bal:1000,day:today(),games:0,wag:0,big:0,pg:{},lost:0,rbc:0,lc:0};DB.users[id]=u;byTok.set(u.tok,u);save();return u}
-const pub=u=>({id:u.id,name:u.name,color:u.color,games:u.games,wag:u.wag,big:u.big,pg:u.pg,on:cl.has(u.id)}),me=u=>({...pub(u),bal:u.bal,lost:u.lost,rbc:u.rbc});
+const pub=u=>({id:u.id,name:u.name,color:u.color,games:u.games,wag:u.wag,big:u.big,pg:u.pg,on:cl.has(u.id)}),me=u=>({...pub(u),bal:u.bal,lost:u.lost,rbc:u.rbc,admUntil:u.adm>Date.now()?u.adm:0});
 const send=(r,ev,d)=>r.write(`event: ${ev}\ndata: ${JSON.stringify(d)}\n\n`),bc=(ev,d)=>{for(const s of cl.values())for(const r of s)send(r,ev,d)},to=(u,ev,d)=>{const s=cl.get(u.id);if(s)for(const r of s)send(r,ev,d)},push=u=>to(u,'me',me(u));
 setInterval(()=>{for(const id of pubQ){const u=DB.users[id];if(u)bc('player',pub(u))}pubQ.clear()},2000);
 function take(u,a){a=r2(+a);if(!(a>0)||a>u.bal||a>1e12)throw'Invalid bet or not enough money';u.bal=r2(u.bal-a);return a}
@@ -65,14 +65,19 @@ function mkRoll(){const q=rf(),res=q<.02?'g':q<.51?'r':'b',tiles=[];let k=0;for(
 function settle(){Rd.done=true;const res=Rd.roll.res;for(const[k,x]of Object.entries(Rd.bets)){const u=DB.users[k];if(!u)continue;fin(u,'Roulette',x.r+x.g+x.b,x[res]*RM[res]);push(u)}DB.rh.unshift(res);DB.rh.length=Math.min(DB.rh.length,100);save();bc('rres',{id:Rd.id,res})}
 function tick(){const n=Date.now(),id=Math.floor(n/CYC),ph=n%CYC;if(id!==Rd.id){if(!Rd.done)settle();Rd={id,bets:{},spun:false,done:false,roll:mkRoll()};bc('rnew',{id});rbc()}if(ph>=BET&&!Rd.spun){Rd.spun=true;bc('rspin',{id,...Rd.roll})}if(ph>=BET+SPN&&!Rd.done)settle()}
 // ---- admin
-function admin(u,b){const k=String(b.key||'');if(!KEY||k.length!==KEY.length||!crypto.timingSafeEqual(Buffer.from(k),Buffer.from(KEY)))throw'Wrong admin key';
-switch(b.op){case'info':return{house:DB.house,n:Object.keys(DB.users).length,on:cl.size};
-case'give':{const l=b.to=='all'?Object.values(DB.users):[DB.users[b.to]],a=r2(+b.amt);if(!l[0]||!(a>0))throw'Pick a player and an amount';for(const t of l){t.bal=r2(t.bal+a);push(t);to(t,'note',{x:'🎁 Admin sent you $'+a})}save();return{}}
-case'set':{const l=b.to=='all'?Object.values(DB.users):[DB.users[b.to]],a=(b.amt===''||b.amt==null)?1000:r2(+b.amt);if(!l[0]||!(a>=0))throw'Pick a player';for(const t of l){t.bal=a;push(t);to(t,'note',{x:'Your balance was set to $'+a})}save();return{}}
+function admin(u,b){const k=String(b.key||''),own=!!KEY&&k.length===KEY.length&&crypto.timingSafeEqual(Buffer.from(k),Buffer.from(KEY)),tmp=u.adm>Date.now();if(!own&&!tmp)throw'Wrong admin key';
+const targets=()=>b.to=='all'?Object.values(DB.users):[DB.users[b.to]];
+switch(b.op){
+case'info':return{owner:own,house:own?DB.house:null,n:Object.keys(DB.users).length,on:cl.size,admins:own?Object.values(DB.users).filter(x=>x.adm>Date.now()).map(x=>({id:x.id,name:x.name,left:x.adm-Date.now()})):[]};
+case'give':{const l=targets(),a=r2(+b.amt);if(!l[0]||!(a>0)||a>1e15)throw'Pick a player and a valid amount';for(const t of l){t.bal=r2(t.bal+a);push(t);to(t,'note',{x:'🎁 Admin sent you $'+a.toLocaleString('en-US')})}save();return{}}
+case'set':{const l=targets(),a=(b.amt===''||b.amt==null)?1000:r2(+b.amt);if(!l[0]||!(a>=0)||a>1e15)throw'Pick a player and a valid amount';for(const t of l){t.bal=a;push(t);to(t,'note',{x:'Your balance was set to $'+a.toLocaleString('en-US')})}save();return{}}
 case'ann':{const x=String(b.text||'').trim().slice(0,200);if(!x)throw'Empty';chatAdd({t:'ann',x});return{}}
 case'clear':DB.chat=[];save();bc('clear',{});return{};
-case'withdraw':{u.bal=r2(u.bal+DB.house);const g=DB.house;DB.house=0;save();return{got:g}}
+case'withdraw':{if(!own)throw'Owner only';u.bal=r2(u.bal+DB.house);const g=DB.house;DB.house=0;save();return{got:g}}
+case'grant':{if(!own)throw'Owner only';const t=DB.users[b.to],ms=Math.min(30*864e5,Math.floor(+b.ms));if(!t||!(ms>=6e4))throw'Pick a player and a time of at least 1 minute';if(t.id===u.id)throw'Pick someone else';t.adm=Date.now()+ms;save();push(t);to(t,'note',{x:'🛡 You were given admin for '+Math.round(ms/60000)+' min'});return{}}
+case'kick':{if(!own)throw'Owner only';const t=DB.users[b.to];if(!t)throw'No such player';t.adm=0;save();push(t);to(t,'note',{x:'Your admin access was removed'});return{}}
 default:throw'Unknown op'}}
+setInterval(()=>{const n=Date.now();for(const x of Object.values(DB.users))if(x.adm&&x.adm<=n){x.adm=0;save();push(x);to(x,'note',{x:'Your admin time ran out'})}},10000);
 // ---- http
 const INDEX=['public/index.html','index.html','public./index.html'].map(p=>path.join(__dirname,p)).find(p=>fs.existsSync(p))||path.join(__dirname,'public','index.html');
 const srvr=http.createServer((req,res)=>{const url=new URL(req.url,'http://x');
