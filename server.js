@@ -5,15 +5,22 @@ const PORT=+process.env.PORT||3000,KEY=process.env.ADMIN_KEY||'',FILE=process.en
 const CYC=20000,BET=15000,SPN=4600,RT=48,RM={r:2,g:50,b:2};
 const PC=['#e11d48','#f97316','#eab308','#22c55e','#06b6d4','#3b82f6','#8b5cf6','#ec4899','#14b8a6','#64748b'];
 let DB={users:{},house:0,chat:[],rh:[]};
-try{Object.assign(DB,JSON.parse(fs.readFileSync(FILE,'utf8')))}catch(e){}
-let dirty=false;const save=()=>{dirty=true};
-const flush=()=>{dirty=false;try{fs.writeFileSync(FILE+'.tmp',JSON.stringify(DB));fs.renameSync(FILE+'.tmp',FILE)}catch(e){console.error('save failed',e.message)}};
-setInterval(()=>{if(dirty)flush()},3000);
-for(const sg of['SIGTERM','SIGINT'])process.on(sg,()=>{flush();process.exit(0)});
+const UR=(process.env.UPSTASH_REDIS_REST_URL||'').replace(/\/$/,''),UT=process.env.UPSTASH_REDIS_REST_TOKEN||'';let canSave=!UR,dirty=false,saving=false,lastUp=0;
+const save=()=>{dirty=true};
+async function ucmd(a){const r=await fetch(UR,{method:'POST',headers:{authorization:'Bearer '+UT,'content-type':'application/json'},body:JSON.stringify(a)}),j=await r.json();if(j.error)throw new Error(j.error);return j.result}
+async function flush(force){if(!dirty&&!force)return;dirty=false;const s=JSON.stringify(DB);try{fs.writeFileSync(FILE+'.tmp',s);fs.renameSync(FILE+'.tmp',FILE)}catch(e){}
+if(UR&&canSave&&!saving&&(force||Date.now()-lastUp>12000)){saving=true;try{await ucmd(['SET','casino:db',s]);lastUp=Date.now()}catch(e){console.error('cloud save failed',e.message);dirty=true}saving=false}else if(UR&&!force)dirty=true}
+setInterval(()=>flush(),3000);
+for(const sg of['SIGTERM','SIGINT'])process.on(sg,async()=>{await flush(true);process.exit(0)});
+async function loadAll(){let v=null;if(UR){let ok=false;for(let i=0;i<6&&!ok;i++){try{const r=await ucmd(['GET','casino:db']);v=r?JSON.parse(r):null;ok=true}catch(e){console.error('cloud load failed',e.message);await new Promise(r=>setTimeout(r,2000))}}if(!ok){console.error('Cannot reach cloud storage; exiting so saved data is never overwritten');process.exit(1)}canSave=true}
+if(!v){try{v=JSON.parse(fs.readFileSync(FILE,'utf8'))}catch(e){}}
+if(v)Object.assign(DB,v);Object.values(DB.users).forEach(u=>byTok.set(u.tok,u));console.log('loaded',Object.keys(DB.users).length,'players'+(UR?' (cloud storage on)':''))}
 const rid=n=>crypto.randomBytes(n).toString('hex'),rf=()=>crypto.randomInt(0,2**31)/2**31,r2=x=>Math.round(x*100)/100,today=()=>new Date().toISOString().slice(0,10);
-const byTok=new Map(Object.values(DB.users).map(u=>[u.tok,u])),cl=new Map(),pubQ=new Set(),SES=new Map();
+const byTok=new Map(),cl=new Map(),pubQ=new Set(),SES=new Map();
 const ses=u=>{let s=SES.get(u.id);if(!s)SES.set(u.id,s={});return s};
-function mkUser(){const id=rid(6),u={id,tok:rid(16),name:'Player'+(100+crypto.randomInt(900)),color:PC[crypto.randomInt(PC.length)],bal:1000,day:today(),games:0,wag:0,big:0,pg:{},lost:0,rbc:0,lc:0};DB.users[id]=u;byTok.set(u.tok,u);save();return u}
+const nk=s=>String(s).toLowerCase().replace(/\s+/g,'');
+function freeName(){for(let i=0;i<60;i++){const n='Player'+(100+crypto.randomInt(9900));if(!Object.values(DB.users).some(o=>nk(o.name)===nk(n)))return n}return'Player'+rid(3)}
+function mkUser(){const id=rid(6),u={id,tok:rid(16),name:freeName(),color:PC[crypto.randomInt(PC.length)],bal:1000,day:today(),games:0,wag:0,big:0,pg:{},lost:0,rbc:0,lc:0};DB.users[id]=u;byTok.set(u.tok,u);save();return u}
 const pub=u=>({id:u.id,name:u.name,color:u.color,games:u.games,wag:u.wag,big:u.big,pg:u.pg,on:cl.has(u.id)}),me=u=>({...pub(u),bal:u.bal,lost:u.lost,rbc:u.rbc});
 const send=(r,ev,d)=>r.write(`event: ${ev}\ndata: ${JSON.stringify(d)}\n\n`),bc=(ev,d)=>{for(const s of cl.values())for(const r of s)send(r,ev,d)},to=(u,ev,d)=>{const s=cl.get(u.id);if(s)for(const r of s)send(r,ev,d)},push=u=>to(u,'me',me(u));
 setInterval(()=>{for(const id of pubQ){const u=DB.users[id];if(u)bc('player',pub(u))}pubQ.clear()},2000);
@@ -48,7 +55,7 @@ slots(u,b){const a=take(u,b.amt),r=[0,1,2].map(()=>Math.floor(rf()*6)),P=[4,6,10
 // ---- social / economy
 chat(u,b){const t=String(b.text||'').replace(/[\u0000-\u001f]/g,' ').trim().slice(0,200),n=Date.now();if(!t)throw'Empty';if(n-u.lc<1000)throw'Slow down';u.lc=n;chatAdd({t:'m',u:u.id,x:t});return{}},
 tip(u,b){const t=DB.users[b.to],a=r2(+b.amt);if(!t||t.id==u.id)throw'Pick another player';if(!(a>0)||a>u.bal)throw'Invalid amount or not enough money';u.bal=r2(u.bal-a);t.bal=r2(t.bal+a);save();push(t);to(t,'note',{x:'🎁 '+u.name+' tipped you '+a.toLocaleString('en-US',{style:'currency',currency:'USD'})});chatAdd({t:'tip',u:u.id,to:t.id,amt:a});return{}},
-profile(u,b){const n=String(b.name||'').replace(/[\u0000-\u001f<>]/g,'').trim().slice(0,16);if(n.length<3)throw'Name must be at least 3 characters';if(!/^#[0-9a-f]{6}$/i.test(b.color))throw'Bad color';u.name=n;u.color=b.color;save();pubQ.add(u.id);return{}},
+profile(u,b){const n=String(b.name||'').replace(/[\u0000-\u001f<>]/g,'').replace(/\s+/g,' ').trim().slice(0,16);if(n.length<3)throw'Name must be at least 3 characters';if(Object.values(DB.users).some(o=>o.id!==u.id&&nk(o.name)===nk(n)))throw'That name is already taken';if(!/^#[0-9a-f]{6}$/i.test(b.color))throw'Bad color';u.name=n;u.color=b.color;save();pubQ.add(u.id);return{}},
 rake(u){const r=Math.floor((u.lost-u.rbc)*15)/100;if(r<.01)throw'No rakeback available';u.bal=r2(u.bal+r);u.rbc=u.lost;save();return{got:r}},
 bail(u){const s=ses(u);if(u.bal>=1||s.cr||s.mn||s.bj)throw'Not available';u.bal=r2(u.bal+100);save();return{}}
 };
@@ -57,33 +64,34 @@ const rbc=()=>bc('rbets',{id:Rd.id,b:Object.entries(Rd.bets).map(([k,v])=>[k,v.r
 function mkRoll(){const q=rf(),res=q<.02?'g':q<.51?'r':'b',tiles=[];let k=0;for(let i=0;i<64;i++)tiles.push(rf()<.03?'g':(k++%2?'b':'r'));let idx=RT;if(res=='g')tiles.splice(RT,0,'g');else while(tiles[idx]!=res)idx++;return{res,tiles,idx,j:(rf()-.5)*50}}
 function settle(){Rd.done=true;const res=Rd.roll.res;for(const[k,x]of Object.entries(Rd.bets)){const u=DB.users[k];if(!u)continue;fin(u,'Roulette',x.r+x.g+x.b,x[res]*RM[res]);push(u)}DB.rh.unshift(res);DB.rh.length=Math.min(DB.rh.length,100);save();bc('rres',{id:Rd.id,res})}
 function tick(){const n=Date.now(),id=Math.floor(n/CYC),ph=n%CYC;if(id!==Rd.id){if(!Rd.done)settle();Rd={id,bets:{},spun:false,done:false,roll:mkRoll()};bc('rnew',{id});rbc()}if(ph>=BET&&!Rd.spun){Rd.spun=true;bc('rspin',{id,...Rd.roll})}if(ph>=BET+SPN&&!Rd.done)settle()}
-setInterval(tick,200);tick();
 // ---- admin
 function admin(u,b){const k=String(b.key||'');if(!KEY||k.length!==KEY.length||!crypto.timingSafeEqual(Buffer.from(k),Buffer.from(KEY)))throw'Wrong admin key';
 switch(b.op){case'info':return{house:DB.house,n:Object.keys(DB.users).length,on:cl.size};
-case'give':{const t=DB.users[b.to],a=r2(+b.amt);if(!t||!(a>0))throw'Bad request';t.bal=r2(t.bal+a);save();push(t);to(t,'note',{x:'🎁 Admin sent you $'+a});return{}}
+case'give':{const l=b.to=='all'?Object.values(DB.users):[DB.users[b.to]],a=r2(+b.amt);if(!l[0]||!(a>0))throw'Pick a player and an amount';for(const t of l){t.bal=r2(t.bal+a);push(t);to(t,'note',{x:'🎁 Admin sent you $'+a})}save();return{}}
+case'set':{const l=b.to=='all'?Object.values(DB.users):[DB.users[b.to]],a=(b.amt===''||b.amt==null)?1000:r2(+b.amt);if(!l[0]||!(a>=0))throw'Pick a player';for(const t of l){t.bal=a;push(t);to(t,'note',{x:'Your balance was set to $'+a})}save();return{}}
 case'ann':{const x=String(b.text||'').trim().slice(0,200);if(!x)throw'Empty';chatAdd({t:'ann',x});return{}}
 case'clear':DB.chat=[];save();bc('clear',{});return{};
 case'withdraw':{u.bal=r2(u.bal+DB.house);const g=DB.house;DB.house=0;save();return{got:g}}
 default:throw'Unknown op'}}
 // ---- http
 const INDEX=['public/index.html','index.html','public./index.html'].map(p=>path.join(__dirname,p)).find(p=>fs.existsSync(p))||path.join(__dirname,'public','index.html');
-http.createServer((req,res)=>{const url=new URL(req.url,'http://x');
+const srvr=http.createServer((req,res)=>{const url=new URL(req.url,'http://x');
 if(req.method=='GET'&&url.pathname=='/api/stream'){const u=byTok.get(url.searchParams.get('t'));if(!u){res.writeHead(401);return res.end()}
 res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','connection':'keep-alive','x-accel-buffering':'no'});
 let s=cl.get(u.id);const first=!s;if(!s)cl.set(u.id,s=new Set());s.add(res);tick();
 send(res,'init',{me:me(u),players:Object.values(DB.users).map(pub),chat:DB.chat.slice(-60),rh:DB.rh,now:Date.now(),rl:{id:Rd.id,spin:Rd.spun?Rd.roll:null,b:Object.entries(Rd.bets).map(([k,v])=>[k,v.r,v.g,v.b])}});
-if(first)bc('on',{id:u.id,on:true});
+if(first)bc('player',pub(u));
 const hb=setInterval(()=>res.write(': ping\n\n'),20000);
 req.on('close',()=>{clearInterval(hb);s.delete(res);if(!s.size){cl.delete(u.id);bc('on',{id:u.id,on:false})}});return}
 if(req.method=='GET'&&url.pathname=='/healthz'){res.writeHead(200);return res.end('ok')}
 if(req.method=='GET'){fs.readFile(INDEX,(e,d)=>{if(e){res.writeHead(500);return res.end('missing public/index.html')}res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-cache'});res.end(d)});return}
 if(req.method=='POST'&&url.pathname.startsWith('/api/')){let raw='';req.on('data',c=>{raw+=c;if(raw.length>10000)req.destroy()});req.on('end',()=>{
 const reply=(code,o)=>{res.writeHead(code,{'content-type':'application/json'});res.end(JSON.stringify(o))};
-try{const b=raw?JSON.parse(raw):{},name=url.pathname.slice(5);
+let uu=null;try{const b=raw?JSON.parse(raw):{},name=url.pathname.slice(5);
 if(name=='join'){let u=byTok.get(b.tok);if(!u)u=mkUser();let bonus=false;if(u.day!==today()){u.day=today();u.bal=r2(u.bal+10000);bonus=true;save()}return reply(200,{tok:u.tok,bonus})}
-const u=byTok.get(req.headers['x-token']);if(!u)return reply(401,{err:'Not signed in'});
+const u=byTok.get(req.headers['x-token']);if(!u)return reply(401,{err:'Not signed in'});uu=u;
 let out;if(name=='admin')out=admin(u,b);else if(Object.prototype.hasOwnProperty.call(G,name))out=G[name](u,b);else return reply(404,{err:'Unknown'});
-out.bal=u.bal;reply(200,out)}catch(e){reply(400,{err:typeof e=='string'?e:'Bad request'});if(typeof e!='string')console.error(e)}})
+out.bal=u.bal;reply(200,out)}catch(e){reply(400,{err:typeof e=='string'?e:'Bad request',bal:uu?uu.bal:undefined});if(typeof e!='string')console.error(e)}})
 ;return}
-res.writeHead(404);res.end()}).listen(PORT,'0.0.0.0',()=>console.log('Will\'s Casino running on port '+PORT+(KEY?'':' (ADMIN_KEY not set: admin disabled)')));
+res.writeHead(404);res.end()});
+loadAll().then(()=>{setInterval(tick,200);tick();srvr.listen(PORT,'0.0.0.0',()=>console.log("Will's Casino running on port "+PORT+(KEY?'':' (ADMIN_KEY not set: admin disabled)')))});
