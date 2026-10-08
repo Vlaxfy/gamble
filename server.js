@@ -67,7 +67,7 @@ case'clear':DB.chat=[];save();bc('clear',{});return{};
 case'withdraw':{u.bal=r2(u.bal+DB.house);const g=DB.house;DB.house=0;save();return{got:g}}
 default:throw'Unknown op'}}
 // ---- http
-const INDEX=path.join(__dirname,'public','index.html');
+const INDEX=['public/index.html','index.html','public./index.html'].map(p=>path.join(__dirname,p)).find(p=>fs.existsSync(p))||path.join(__dirname,'public','index.html');
 http.createServer((req,res)=>{const url=new URL(req.url,'http://x');
 if(req.method=='GET'&&url.pathname=='/api/stream'){const u=byTok.get(url.searchParams.get('t'));if(!u){res.writeHead(401);return res.end()}
 res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','connection':'keep-alive','x-accel-buffering':'no'});
